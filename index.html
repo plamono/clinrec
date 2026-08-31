@@ -55,7 +55,31 @@ h2{font-size:16px; margin:18px 0 8px}
   border-radius:99px; padding:1px 8px; margin:0 6px 0 0;
 }
 .doc{font-size:15px}
-.doc p{margin:0 0 10px; white-space:pre-wrap}
+.doc p{margin:0 0 10px}
+/* Таблицы в клинических рекомендациях — это схемы дозирования и выбор
+   терапии, то есть самое нужное. Ширину им не урезаем: пусть уезжает
+   вбок внутри своей рамки, но остаётся таблицей. Прокрутка именно у
+   обёртки, а не у страницы — иначе вся страница ездит горизонтально. */
+.tw{overflow-x:auto; -webkit-overflow-scrolling:touch; margin:0 0 14px;
+    border:1px solid color-mix(in srgb,var(--hint) 30%,transparent);
+    border-radius:var(--radius)}
+.doc table{border-collapse:collapse; width:max-content; min-width:100%;
+           font-size:13.5px; line-height:1.35}
+.doc th,.doc td{
+  border:1px solid color-mix(in srgb,var(--hint) 28%,transparent);
+  padding:7px 9px; vertical-align:top; text-align:left;
+  max-width:min(62vw,340px);
+}
+.doc th{background:var(--card); font-weight:600; position:sticky; top:0}
+.doc td p,.doc th p{margin:0 0 4px}
+.doc td p:last-child,.doc th p:last-child{margin:0}
+.doc ul,.doc ol{margin:0 0 10px; padding-left:22px}
+.doc li{margin:0 0 4px}
+.doc h3,.doc h4,.doc h5{font-size:15px; margin:16px 0 6px}
+a.xref{
+  color:var(--link); text-decoration:none; font-weight:600;
+  border-bottom:1px dashed currentColor; padding:0 1px;
+}
 .doc .pill{
   display:inline-block; background:var(--card); color:var(--hint);
   border-radius:99px; padding:3px 10px; font-size:13px; margin:0 0 12px;
@@ -156,12 +180,40 @@ function docToc(doc){
     </button>`).join('');
 }
 
+/* Перекрёстные ссылки: «см. табл. 10», «(см. Табл 10,12)».
+   В рекомендациях таких отсылок десятки, и без перехода они бесполезны:
+   читатель видит «см. таблицу 12», а где эта таблица — ищи сам. Номер
+   таблицы ищется в карте документа и превращается в переход. */
+const REF_RE = /(табл(?:иц[аеуы]?|\.)?\s*№?\s*)((?:\d{1,2})(?:\s*[,и]\s*\d{1,2})*)/gi;
+
+function crossRefs(html, doc){
+  const map = doc.tables || {};
+  return html.replace(REF_RE, (whole, word, nums) => {
+    const linked = nums.replace(/\d{1,2}/g, n =>
+      map[n] !== undefined
+        ? `<a class="xref" href="#" data-sec="${map[n]}" data-tbl="${n}">${n}</a>`
+        : n);
+    return word + linked;
+  });
+}
+
 function sectionView(doc, i){
   const s = doc.sections[i];
-  const paras = String(s.text||'').split(/\n{2,}/).filter(Boolean);
+  // Разметка есть только у разделов с таблицами — там текст без неё
+  // нечитаем. У остальных она была бы теми же абзацами, обёрнутыми в <p>.
+  const body = s.html
+    ? s.html
+    : String(s.text||'').split(/\n{2,}/).filter(Boolean)
+        .map(p => `<p>${esc(p)}</p>`).join('');
+  // Каждую таблицу — в свою прокручиваемую обёртку. Без неё широкая
+  // таблица растягивает страницу, и по телефону начинает ездить вбок всё
+  // сразу, включая заголовок и поиск.
+  const wrapped = crossRefs(body, doc)
+    .replace(/<table/g, '<div class="tw"><table')
+    .replace(/<\/table>/g, '</table></div>');
   return `<p class="crumb">${esc(doc.name)}</p>
     <h1>${esc(s.title)}</h1>
-    <div class="doc">${paras.map(p=>`<p>${esc(p)}</p>`).join('')}</div>`;
+    <div class="doc">${wrapped}</div>`;
 }
 
 function results(query){
@@ -316,6 +368,47 @@ function bind(){
   app.querySelectorAll('[data-open]').forEach(el => el.onclick = () => {
     box.value = ''; openDoc(el.dataset.open, el.dataset.idx);
   });
+  // Переход по «см. табл. N».
+  //
+  // Половина отсылок ведёт в тот же раздел, где напечатана и сама
+  // таблица: «3. Лечение» ссылается на таблицу 13, которая двумя
+  // экранами ниже. Толкать читателя в тот же экран, где он стоит, —
+  // выглядит поломкой. Поэтому внутри раздела прокручиваем, между
+  // разделами переходим и прокручиваем уже там.
+  app.querySelectorAll('a.xref').forEach(el => el.onclick = ev => {
+    ev.preventDefault();
+    const view = state.stack[state.stack.length-1];
+    if (!view || !view.doc) return;
+    const target = +el.dataset.sec, num = el.dataset.tbl;
+    if (view.kind === 'section' && view.i === target){
+      scrollToTable(num);
+    } else {
+      push({kind:'section', doc:view.doc, i:target});
+      setTimeout(() => scrollToTable(num), 60);
+    }
+  });
+}
+
+function scrollToTable(num){
+  // Подпись «Таблица N.» стоит рядом с таблицей — по ней и ищем.
+  const re = new RegExp('таблиц[аеы]?\\s*№?\\s*' + num + '(?!\\d)', 'i');
+  const nodes = app.querySelectorAll('p, h3, h4, h5, caption, .tw');
+  for (const node of nodes){
+    if (re.test(node.textContent || '')){
+      // Прокрутка мгновенная и позиция считается вручную. scrollIntoView
+      // и behavior:'smooth' в вебвью Telegram на длинных разделах молча
+      // не срабатывают — переход просто не происходит, и выглядит это
+      // как сломанная ссылка. Прыжок хуже плавности, но он случается.
+      const top = node.getBoundingClientRect().top + window.scrollY - 64;
+      window.scrollTo(0, Math.max(0, top));
+      node.style.transition = 'background .25s';
+      const was = node.style.background;
+      node.style.background = 'color-mix(in srgb,var(--accent) 22%,transparent)';
+      setTimeout(() => { node.style.background = was; }, 1400);
+      return;
+    }
+  }
+  window.scrollTo({top:0, behavior:'smooth'});
 }
 
 let typing;

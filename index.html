@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Клинические рекомендации</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+/* Цвета берём у Telegram: приложение должно выглядеть частью клиента,
+   а не вставленной страницей. Запасные значения — на случай открытия
+   в обычном браузере. */
+:root{
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --fg: var(--tg-theme-text-color, #101418);
+  --hint: var(--tg-theme-hint-color, #7a8794);
+  --link: var(--tg-theme-link-color, #2b7cd3);
+  --card: var(--tg-theme-secondary-bg-color, #f2f4f7);
+  --accent: var(--tg-theme-button-color, #2b7cd3);
+  --on-accent: var(--tg-theme-button-text-color, #ffffff);
+  --radius: 12px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  padding:0 0 32px; -webkit-text-size-adjust:100%;
+}
+header{
+  position:sticky; top:0; z-index:5; background:var(--bg);
+  padding:10px 14px 8px; border-bottom:1px solid color-mix(in srgb,var(--hint) 25%,transparent);
+}
+#q{
+  width:100%; padding:11px 14px; font-size:16px; color:var(--fg);
+  background:var(--card); border:0; border-radius:var(--radius); outline:none;
+}
+#q::placeholder{color:var(--hint)}
+main{padding:12px 14px}
+h1{font-size:19px; margin:4px 0 2px}
+h2{font-size:16px; margin:18px 0 8px}
+.sub{color:var(--hint); font-size:14px; margin:0 0 14px}
+.row{
+  display:block; width:100%; text-align:left; cursor:pointer;
+  background:var(--card); color:var(--fg); border:0;
+  border-radius:var(--radius); padding:12px 14px; margin:0 0 8px;
+  font:inherit; line-height:1.35;
+}
+.row:active{opacity:.7}
+.row .t{font-weight:600}
+.row .m{display:block; color:var(--hint); font-size:13px; margin-top:3px}
+.row.now{box-shadow:inset 3px 0 0 var(--accent)}
+.chip{
+  display:inline-block; font-size:12px; color:var(--hint);
+  border:1px solid color-mix(in srgb,var(--hint) 35%,transparent);
+  border-radius:99px; padding:1px 8px; margin:0 6px 0 0;
+}
+.doc{font-size:15px}
+.doc p{margin:0 0 10px; white-space:pre-wrap}
+.doc .pill{
+  display:inline-block; background:var(--card); color:var(--hint);
+  border-radius:99px; padding:3px 10px; font-size:13px; margin:0 0 12px;
+}
+.empty{color:var(--hint); padding:24px 4px; text-align:center}
+a.pdf{
+  display:inline-block; margin:2px 0 14px; color:var(--on-accent);
+  background:var(--accent); border-radius:var(--radius);
+  padding:10px 16px; text-decoration:none; font-weight:600;
+}
+mark{background:color-mix(in srgb,var(--accent) 28%,transparent); color:inherit; border-radius:3px}
+.crumb{color:var(--hint); font-size:13px; margin:0 0 10px}
+.spinner{color:var(--hint); padding:20px; text-align:center}
+</style>
+</head>
+<body>
+<header><input id="q" type="search" placeholder="Поиск по рекомендациям…" autocomplete="off"></header>
+<main id="app"><div class="spinner">Загрузка…</div></main>
+
+<script>
+const TG = window.Telegram && window.Telegram.WebApp;
+if (TG) { TG.ready(); TG.expand(); }
+
+const app = document.getElementById('app');
+const box = document.getElementById('q');
+const state = { index:null, search:null, terms:null, course:null, stack:[], docCache:{} };
+
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function json(path){
+  const r = await fetch(path, {cache:'no-cache'});
+  if (!r.ok) throw new Error(path + ': ' + r.status);
+  return r.json();
+}
+
+/* ---------- навигация ---------- */
+function push(view){ state.stack.push(view); render(); }
+function back(){ if (state.stack.length > 1) { state.stack.pop(); render(); } }
+
+if (TG) {
+  TG.BackButton.onClick(() => {
+    if (box.value) { box.value=''; render(); return; }
+    if (state.stack.length > 1) back(); else TG.close();
+  });
+}
+function syncBack(){
+  if (!TG) return;
+  const deep = state.stack.length > 1 || box.value;
+  deep ? TG.BackButton.show() : TG.BackButton.hide();
+}
+
+/* ---------- экраны ---------- */
+function courses(){
+  const list = Object.keys(state.index.courses).sort();
+  return `<h1>Клинические рекомендации</h1>
+    <p class="sub">Выберите курс</p>` +
+    list.map(c => `<button class="row" data-course="${esc(c)}">
+      <span class="t">${esc(c)} курс</span>
+      <span class="m">${state.index.courses[c].topics.length} тем</span>
+    </button>`).join('');
+}
+
+function topics(){
+  const c = state.index.courses[state.course];
+  return `<h1>${esc(state.course)} курс</h1>
+    <p class="sub">${esc(c.title||'')}</p>` +
+    c.topics.map(t => `<button class="row${t.n===c.current?' now':''}" data-topic="${t.n}">
+      <span class="t">${t.n}. ${esc(t.title)}</span>
+      <span class="m">${t.docs.length} ${plural(t.docs.length,'документ','документа','документов')}</span>
+    </button>`).join('') || `<p class="empty">Тем пока нет</p>`;
+}
+
+function topicDocs(n){
+  const c = state.index.courses[state.course];
+  const t = c.topics.find(x => x.n === n);
+  if (!t) return `<p class="empty">Тема не найдена</p>`;
+  return `<p class="crumb">${esc(state.course)} курс · тема ${t.n}</p>
+    <h1>${esc(t.title)}</h1>` +
+    (t.docs.length ? t.docs.map(d => `<button class="row" data-doc="${esc(d.id)}">
+      <span class="t">${esc(d.name)}</span>
+      <span class="m">${d.year?esc(d.year)+' · ':''}${d.sections} ${plural(d.sections,'раздел','раздела','разделов')}</span>
+    </button>`).join('') : `<p class="empty">Документов по этой теме нет</p>`);
+}
+
+function docToc(doc){
+  // Имя файла — «КР Бронхит 2024.pdf»: пробелы и кириллица. Браузер
+  // такое чаще всего доедает сам, но не всякий и не везде, а ссылка на
+  // PDF — ровно то, ради чего студент сюда пришёл.
+  const href = doc.pdf ? doc.pdf.split('/').map(encodeURIComponent).join('/') : '';
+  const pdf = doc.pdf ? `<a class="pdf" href="${esc(href)}" target="_blank" rel="noopener">Скачать PDF</a>` : '';
+  return `<p class="crumb">Клинические рекомендации${doc.year?' · '+esc(doc.year):''}</p>
+    <h1>${esc(doc.name)}</h1>
+    ${doc.mkb?`<p class="sub">МКБ ${esc(doc.mkb)}</p>`:''}
+    ${pdf}` +
+    doc.sections.map((s,i) => `<button class="row" data-sec="${i}">
+      <span class="t">${esc(s.title)}</span>
+    </button>`).join('');
+}
+
+function sectionView(doc, i){
+  const s = doc.sections[i];
+  const paras = String(s.text||'').split(/\n{2,}/).filter(Boolean);
+  return `<p class="crumb">${esc(doc.name)}</p>
+    <h1>${esc(s.title)}</h1>
+    <div class="doc">${paras.map(p=>`<p>${esc(p)}</p>`).join('')}</div>`;
+}
+
+function results(query){
+  const words = [...new Set(tokens(query))];
+  if (!words.length) return '';
+
+  /* Обратный индекс: основа слова -> номера разделов. Ищем по ПОЛНОМУ
+     тексту документа, а не по видимому куску: термин из середины
+     длинного раздела иначе не находится, и это первое, обо что
+     спотыкается человек.
+
+     Требовать все слова сразу нельзя. «Антибактериальная терапия
+     пиелонефрита» — три слова, которые вместе в одном абзаце не стоят
+     почти никогда, и строгое И давало пустую выдачу на совершенно
+     нормальный запрос. Поэтому считаем, сколько слов совпало, и берём
+     те разделы, где их хотя бы половина. */
+  const counts = new Map();
+  const missing = [];
+  for (const w of words){
+    const list = state.terms[w];
+    if (!list){ missing.push(w); continue; }
+    for (const idx of list) counts.set(idx, (counts.get(idx) || 0) + 1);
+  }
+
+  const need = Math.max(1, Math.ceil((words.length - missing.length) / 2));
+  const hits = [];
+  for (const [idx, hitCount] of counts){
+    if (hitCount < need) continue;
+    const row = state.search[idx];
+    if (!row) continue;
+    if (state.course && row.c && String(row.c) !== String(state.course)) continue;
+    // Совпадение в заголовке весит больше: «лечение» есть в тексте почти
+    // каждого раздела, а в названии — только у нужного.
+    const inTitle = tokens(row.t).filter(t => words.includes(t)).length;
+    // Число совпавших слов важнее всего остального. Без этого «Бронхит ·
+    // 5. Профилактика» обгонял «Рахит · 5. Профилактика» по запросу
+    // «профилактика рахита»: одно слово в заголовке перевешивало два
+    // слова в тексте.
+    const inSnippet = words.some(w => row.s.toLowerCase().includes(w)) ? 1 : 0;
+    // Совпадение с НАЗВАНИЕМ документа — сильный сигнал: по запросу
+    // «классификация пневмоний» раздел «1.5 Классификация» из «Бронхита»
+    // и из «Пневмонии» неотличимы по тексту, а нужен второй.
+    const inDoc = tokens(row.n).filter(t => words.includes(t)).length;
+    hits.push({row, score: hitCount * 10 + inDoc * 5 + inTitle * 3 + inSnippet});
+  }
+  hits.sort((a,b) => b.score - a.score);
+
+  if (!hits.length){
+    const hint = missing.length
+      ? `Не встречается в материалах: ${missing.map(esc).join(', ')}.`
+      : 'Попробуйте одно-два слова из термина.';
+    return `<p class="empty">Ничего не нашлось.<br>${hint}</p>`;
+  }
+  return `<p class="sub">Найдено разделов: ${hits.length}</p>` +
+    hits.slice(0,80).map(h => `<button class="row" data-open="${esc(h.row.d)}" data-idx="${h.row.i}">
+      <span class="t">${hl(h.row.t, words)}</span>
+      <span class="m">${esc(h.row.n)}</span>
+      <span class="m">${hl(h.row.s, words)}</span>
+    </button>`).join('');
+}
+
+/* ---------- разбор слов ----------
+   Точная копия materials.tokens из бота. Именно копия, а не «примерно
+   так же»: если приложение снимает окончания иначе, «пиелонефрита»
+   находится в боте и не находится здесь, и объяснить это нечем.      */
+const STOP = new Set(('и в на с по для что как это не или при из от до за над под но же бы ли ' +
+  'когда где почему зачем какой какая какие чем был была было были есть быть мне меня нам ' +
+  'его их она они оно весь все всё так тоже дети детей детям детях ребенок ребенка ребенку ' +
+  'children child pediatric the a an of to in is are for and or what when where why how which ' +
+  'was were be this that with from about can does do').split(' '));
+
+const ENDINGS = ['ированием','ированию','ирования','ированный',
+  'ами','ями','ах','ях','ов','ев','ей','ой','ую','юю','ые','ий',
+  'ых','их','ом','ем','им','ым','ия','ии','ие','ью','ья','ям',
+  'а','я','ы','и','у','ю','е','о','ь'];
+
+function stem(word){
+  for (const end of ENDINGS){
+    if (word.endsWith(end) && word.length - end.length >= 4){
+      return word.slice(0, word.length - end.length).slice(0, 6);
+    }
+  }
+  return word.slice(0, 6);
+}
+
+function tokens(s){
+  // \p{L}, а не [^\W\d_]: в JavaScript \w — это только латиница и цифры,
+  // поэтому \W включает кириллицу, и отрицающий класс выбрасывал ровно
+  // те слова, ради которых всё написано. В Python \w юникодный, и
+  // дословный перенос выражения из бота молча ломал поиск целиком.
+  const words = String(s||'').toLowerCase().replace(/ё/g,'е').match(/\p{L}+/gu) || [];
+  return words.filter(w => w.length > 2 && !STOP.has(w)).map(stem);
+}
+function hl(text, stems){
+  // Подсвечиваем по основе плюс возможное окончание: искали «рахита», в
+  // тексте стоит «рахит» — выделить надо и его, иначе подсветка
+  // промахивается мимо собственной находки.
+  let out = esc(text);
+  for (const st of stems){
+    if (st.length < 3) continue;
+    const safe = st.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp('(' + safe + '[^\\s.,;:()<>]{0,4})', 'giu'),
+                      '<mark>$1</mark>');
+  }
+  return out;
+}
+function plural(n, one, few, many){
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+/* ---------- отрисовка ---------- */
+function render(){
+  syncBack();
+  if (box.value.trim()){ app.innerHTML = results(box.value.trim()); return bind(); }
+  const view = state.stack[state.stack.length-1];
+  if (!view) { app.innerHTML = courses(); return bind(); }
+  if (view.kind === 'courses') app.innerHTML = courses();
+  else if (view.kind === 'topics') app.innerHTML = topics();
+  else if (view.kind === 'topic') app.innerHTML = topicDocs(view.n);
+  else if (view.kind === 'doc') app.innerHTML = docToc(view.doc);
+  else if (view.kind === 'section') app.innerHTML = sectionView(view.doc, view.i);
+  window.scrollTo(0,0);
+  bind();
+}
+
+async function openDoc(id, sectionIndex){
+  if (!state.docCache[id]){
+    app.innerHTML = '<div class="spinner">Загружаю документ…</div>';
+    try { state.docCache[id] = await json('data/doc/' + id + '.json'); }
+    catch(e){ app.innerHTML = '<p class="empty">Документ не открылся</p>'; return; }
+  }
+  const doc = state.docCache[id];
+  if (sectionIndex == null) push({kind:'doc', doc});
+  else { state.stack.push({kind:'doc', doc}); push({kind:'section', doc, i:+sectionIndex}); }
+}
+
+function bind(){
+  app.querySelectorAll('[data-course]').forEach(el => el.onclick = () => {
+    state.course = el.dataset.course; push({kind:'topics'});
+  });
+  app.querySelectorAll('[data-topic]').forEach(el => el.onclick = () =>
+    push({kind:'topic', n:+el.dataset.topic}));
+  app.querySelectorAll('[data-doc]').forEach(el => el.onclick = () =>
+    openDoc(el.dataset.doc, null));
+  app.querySelectorAll('[data-sec]').forEach(el => el.onclick = () => {
+    const view = state.stack[state.stack.length-1];
+    push({kind:'section', doc:view.doc, i:+el.dataset.sec});
+  });
+  app.querySelectorAll('[data-open]').forEach(el => el.onclick = () => {
+    box.value = ''; openDoc(el.dataset.open, el.dataset.idx);
+  });
+}
+
+let typing;
+box.oninput = () => { clearTimeout(typing); typing = setTimeout(render, 180); };
+
+(async function start(){
+  try {
+    state.index = await json('data/index.json');
+    state.search = await json('data/search.json');
+    state.terms = await json('data/terms.json');
+  } catch(e){
+    app.innerHTML = '<p class="empty">Данные не загрузились. Обновите страницу.</p>';
+    return;
+  }
+  const wanted = new URLSearchParams(location.search).get('course');
+  const known = Object.keys(state.index.courses);
+  if (wanted && state.index.courses[wanted]) { state.course = wanted; state.stack=[{kind:'topics'}]; }
+  else if (known.length === 1) { state.course = known[0]; state.stack=[{kind:'topics'}]; }
+  else state.stack = [{kind:'courses'}];
+  render();
+})();
+</script>
+</body>
+</html>
